@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Dải Ngân Hà &amp; Trái Tim</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #160016;
+        }
+
+        canvas {
+            display: block;
+            touch-action: none;
+        }
+
+        #hint {
+            position: fixed;
+            left: 50%;
+            bottom: 26px;
+            transform: translateX(-50%);
+            font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+            font-size: 12px;
+            font-weight: 400;
+            letter-spacing: .22em;
+            text-transform: uppercase;
+            color: rgba(255, 205, 228, .55);
+            white-space: nowrap;
+            pointer-events: none;
+            user-select: none;
+            transition: opacity .8s ease;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="hint">Kéo để xoay · Chạm để tiếp tục</div>
+
+    <script type="module">
+        /* ------------------------------------------------------------------ *
+         *  DẢI NGÂN HÀ  →  TRÁI TIM (Lighter & Princess / 点燃我，温暖你)
+         *  Toàn bộ hiệu ứng chạy trên GPU (WebGL) nên không lag như bản Python.
+         *  Chỉnh nhanh mọi thứ ở khối CFG bên dưới.
+         * ------------------------------------------------------------------ */
+
+        const CFG = {
+            AUTO_DELAY: 9.0,      // sau bao nhiêu giây thì tự chuyển sang trái tim
+            FORM_DUR: 2.6,      // thời gian các hạt bay về tạo thành tim
+            STAGGER: 1.5,      // độ lệch pha giữa các hạt khi bay
+            CAM_DUR: 3.0,      // thời gian camera di chuyển
+            BEAT_PERIOD: 0.90,     // 1 nhịp đập (giây)  ~ 66 bpm
+            GALAXY_DIM: 0.0,      // độ sáng ngân hà khi tim hiện ra (0 = tắt hẳn, 0.25 = mờ phía sau)
+            RETURN_DUR: 2.6,      // thời gian bay ngược về lại dải ngân hà (phím R)
+
+            HEART_SCALE: 0.055,    // kích thước tim
+            HEART_DEPTH: 95,       // độ "phồng" 3D của tim (px, 0 = tim phẳng)
+            BEAT_POWER: 10.0,     // biên độ co bóp
+
+            COL_CORE: '#ff2a68',  // hồng đậm ở lõi
+            COL_EDGE: '#ff74b1',  // hồng nhạt ở viền
+            COL_HALO: '#ff4d93',  // quầng sáng
+            COL_GLOW: '#ff2f6e'   // ánh hào quang phía sau
+        };
+
+        /* --- three.js (skypack, có dự phòng unpkg) --------------------------- */
+        let THREE, OrbitControls;
+        try {
+            THREE = await import("https://cdn.skypack.dev/three@0.136.0");
+            ({ OrbitControls } = await import("https://cdn.skypack.dev/three@0.136.0/examples/jsm/controls/OrbitControls"));
+        } catch (e) {
+            THREE = await import("https://unpkg.com/three@0.136.0/build/three.module.js");
+            ({ OrbitControls } = await import("https://unpkg.com/three@0.136.0/examples/jsm/controls/OrbitControls.js"));
+        }
+
+        /* ================================================================== *
+         *  1. SCENE  +  DẢI NGÂN HÀ  (giữ nguyên như file gốc)
+         * ================================================================== */
+
+        let scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x160016);
+        let camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 1000);
+        camera.position.set(0, 4, 21);
+        let renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(innerWidth, innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        let controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.enablePan = false;
+        controls.minDistance = 6;
+        controls.maxDistance = 90;
+
+        let gu = {
+            time: { value: 0 },
+            gFade: { value: 1 }          // chỉ dùng để làm mờ ngân hà lúc tim xuất hiện
+        }
+
+        let sizes = [];
+        let shift = [];
+        let pushShift = () => {
+            shift.push(
+                Math.random() * Math.PI,
+                Math.random() * Math.PI * 2,
+                (Math.random() * 0.9 + 0.1) * Math.PI * 0.1,
+                Math.random() * 0.9 + 0.1
+            );
+        }
+        let pts = new Array(50000).fill().map(p => {
+            sizes.push(Math.random() * 1.5 + 0.5);
+            pushShift();
+            return new THREE.Vector3().randomDirection().multiplyScalar(Math.random() * 0.5 + 9.5);
+        })
+        for (let i = 0; i < 100000; i++) {
+            let r = 10, R = 40;
+            let rand = Math.pow(Math.random(), 1.5);
+            let radius = Math.sqrt(R * R * rand + (1 - rand) * r * r);
+            pts.push(new THREE.Vector3().setFromCylindricalCoords(radius, Math.random() * 2 * Math.PI, (Math.random() - 0.5) * 2));
+            sizes.push(Math.random() * 1.5 + 0.5);
+            pushShift();
+        }
+
+        let g = new THREE.BufferGeometry().setFromPoints(pts);
+        g.setAttribute("sizes", new THREE.Float32BufferAttribute(sizes, 1));
+        g.setAttribute("shift", new THREE.Float32BufferAttribute(shift, 4));
+        let m = new THREE.PointsMaterial({
+            size: 0.125,
+            transparent: true,
+            depthTest: false,
+            blending: THREE.AdditiveBlending,
+            onBeforeCompile: shader => {
+                shader.uniforms.time = gu.time;
+                shader.uniforms.gFade = gu.gFade;
+                shader.vertexShader = `
+      uniform float time;
+      attribute float sizes;
+      attribute vec4 shift;
+      varying vec3 vColor;
+      ${shader.vertexShader}
+    `.replace(
+                    `gl_PointSize = size;`,
+                    `gl_PointSize = size * sizes;`
+                ).replace(
+                    `#include <color_vertex>`,
+                    `#include <color_vertex>
+        float d = length(abs(position) / vec3(40., 10., 40));
+        d = clamp(d, 0., 1.);
+        vColor = mix(vec3(227., 155., 0.), vec3(100., 50., 255.), d) / 255.;
+      `
+                ).replace(
+                    `#include <begin_vertex>`,
+                    `#include <begin_vertex>
+        float t = time;
+        float moveT = mod(shift.x + shift.z * t, PI2);
+        float moveS = mod(shift.y + shift.z * t, PI2);
+        transformed += vec3(cos(moveS) * sin(moveT), cos(moveT), sin(moveS) * sin(moveT)) * shift.a;
+      `
+                );
+                shader.fragmentShader = `
+      varying vec3 vColor;
+      uniform float gFade;
+      ${shader.fragmentShader}
+    `.replace(
+                    `#include <clipping_planes_fragment>`,
+                    `#include <clipping_planes_fragment>
+        float d = length(gl_PointCoord.xy - 0.5);
+      `
+                ).replace(
+                    `vec4 diffuseColor = vec4( diffuse, opacity );`,
+                    `vec4 diffuseColor = vec4( vColor, smoothstep(0.5, 0.1, d) * gFade );`
+                );
+            }
+        });
+        let p = new THREE.Points(g, m);
+        p.rotation.order = "ZYX";
+        p.rotation.z = 0.2;
+        scene.add(p);
+
+        /* ================================================================== *
+         *  2. TRÁI TIM HẠT  (dựng lại từ thuật toán trong test.py, chạy GPU)
+         * ================================================================== */
+
+        const E = 11;                       // IMAGE_ENLARGE
+        const HEART_W = 352, HEART_H = 318.16, HEART_CY = -27.92;   // bbox (px)
+
+        // y đã lật lên (three.js dùng trục y hướng lên)
+        function heartXY(t, s) {
+            return [
+                16 * Math.pow(Math.sin(t), 3) * s,
+                (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * s
+            ];
+        }
+        // lấy mẫu đều theo chiều dài đường cong (nếu lấy t ngẫu nhiên, hạt sẽ dồn
+        // cục ở đỉnh và mũi tim tạo thành một vệt sáng dọc rất xấu)
+        const LUT = [0]; let TOTLEN = 0;
+        {
+            const N = 4096; let prev = heartXY(0, E);
+            for (let i = 1; i <= N; i++) {
+                const c = heartXY(i / N * Math.PI * 2, E);
+                TOTLEN += Math.hypot(c[0] - prev[0], c[1] - prev[1]); prev = c;
+                LUT.push(TOTLEN);
+            }
+        }
+        function sampleT() {
+            const target = Math.random() * TOTLEN;
+            let lo = 0, hi = LUT.length - 1;
+            while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (LUT[mid] < target) lo = mid; else hi = mid; }
+            const f = (target - LUT[lo]) / Math.max(1e-9, LUT[hi] - LUT[lo]);
+            return (lo + f) / (LUT.length - 1) * Math.PI * 2;
+        }
+
+        function scatterInside(x, y, beta) {           // khuếch tán vào trong
+            const rx = -beta * Math.log(Math.random());
+            const ry = -beta * Math.log(Math.random());
+            return [x - rx * x, y - ry * y];
+        }
+
+        // mật độ hạt: giảm bớt trên máy yếu / điện thoại
+        const Q = (Math.min(innerWidth, innerHeight) < 620) ? 0.5 : 1.0;
+        const N_OUT = Math.round(6500 * Q);   // đường viền
+        const N_EDGE = 3;                      // số hạt khuếch tán / điểm viền
+        const N_CEN = Math.round(16000 * Q);  // khuếch tán trung tâm
+        const N_CORE = Math.round(11000 * Q);  // lõi sáng ở giữa
+        const N_HALO = Math.round(15000 * Q);  // quầng sáng
+
+        const total = N_OUT * (1 + N_EDGE) + N_CEN + N_CORE + N_HALO;
+        const aPos = new Float32Array(total * 3);
+        const aStart = new Float32Array(total * 3);
+        const aJit = new Float32Array(total * 3);
+        const aSize = new Float32Array(total);
+        const aSeed = new Float32Array(total);
+        const aType = new Float32Array(total);
+        const aFrac = new Float32Array(total);
+        let n = 0;
+
+        // điểm xuất phát: lấy ngay trong dải ngân hà (đĩa + cầu), đổi về hệ toạ độ của tim
+        const invS = 1 / CFG.HEART_SCALE;
+        function starStart() {
+            let x, y, z;
+            if (Math.random() < 0.65) {
+                const rand = Math.pow(Math.random(), 1.5);
+                const radius = Math.sqrt(1600 * rand + (1 - rand) * 100);
+                const a = Math.random() * Math.PI * 2;
+                x = Math.cos(a) * radius; y = (Math.random() - 0.5) * 2; z = Math.sin(a) * radius;
+            } else {
+                const v = new THREE.Vector3().randomDirection().multiplyScalar(Math.random() * 0.5 + 9.5);
+                x = v.x; y = v.y; z = v.z;
+            }
+            return [x * invS, y * invS, z * invS];
+        }
+
+        function push(x, y, z, size, type, frac, jx = 0, jy = 0, jz = 0) {
+            const i3 = n * 3;
+            aPos[i3] = x; aPos[i3 + 1] = y; aPos[i3 + 2] = z;
+            const s = starStart();
+            aStart[i3] = s[0]; aStart[i3 + 1] = s[1]; aStart[i3 + 2] = s[2];
+            aJit[i3] = jx; aJit[i3 + 1] = jy; aJit[i3 + 2] = jz;
+            aSize[n] = size; aSeed[n] = Math.random(); aType[n] = type; aFrac[n] = frac;
+            n++;
+        }
+        // độ dày 3D: viền phẳng, càng vào trong càng phồng (như trái tim bơm hơi)
+        function puff(frac) {
+            const k = Math.sqrt(Math.max(0, 1 - frac * frac));
+            return (Math.random() * 2 - 1) * CFG.HEART_DEPTH * k;
+        }
+
+        const outline = [];
+        for (let i = 0; i < N_OUT; i++) {
+            const t = sampleT();
+            const [x, y] = heartXY(t, E);
+            outline.push([x, y]);
+            push(x, y, 0, 1 + Math.random() * 2, 0, 1);            // 0 = viền
+        }
+        for (let i = 0; i < N_OUT; i++) {                            // 1 = khuếch tán viền
+            const [ox, oy] = outline[i];
+            const rr = Math.hypot(ox, oy) || 1;
+            for (let k = 0; k < N_EDGE; k++) {
+                const [x, y] = scatterInside(ox, oy, 0.05);
+                const f = Math.min(1, Math.hypot(x, y) / rr);
+                push(x, y, puff(f), 1 + Math.random(), 1, f);
+            }
+        }
+        for (let i = 0; i < N_CEN; i++) {                            // 2 = khuếch tán tâm
+            const [ox, oy] = outline[(Math.random() * N_OUT) | 0];
+            const rr = Math.hypot(ox, oy) || 1;
+            const [x, y] = scatterInside(ox, oy, 0.17);
+            const f = Math.min(1, Math.hypot(x, y) / rr);
+            push(x, y, puff(f), 1 + Math.random(), 2, f);
+        }
+        for (let i = 0; i < N_CORE; i++) {                           // 2 = lõi sáng
+            const [ox, oy] = outline[(Math.random() * N_OUT) | 0];
+            const rr = Math.hypot(ox, oy) || 1;
+            let [x, y] = scatterInside(ox, oy, 0.16);
+            [x, y] = scatterInside(x, y, 0.16);
+            const f = Math.min(1, Math.hypot(x, y) / rr);
+            push(x, y, puff(f), 1 + Math.random(), 2, f);
+        }
+        for (let i = 0; i < N_HALO; i++) {                           // 3 = quầng sáng
+            const t = sampleT();
+            const [x, y] = heartXY(t, 11.6);
+            push(x, y, 0, Math.random() < 0.34 ? 1 : 2, 3, 1,
+                (Math.random() * 28 - 14), (Math.random() * 28 - 14), (Math.random() * 2 - 1) * 34);
+        }
+
+        const hg = new THREE.BufferGeometry();
+        hg.setAttribute('position', new THREE.BufferAttribute(aPos, 3));
+        hg.setAttribute('aStart', new THREE.BufferAttribute(aStart, 3));
+        hg.setAttribute('aJitter', new THREE.BufferAttribute(aJit, 3));
+        hg.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1));
+        hg.setAttribute('aSeed', new THREE.BufferAttribute(aSeed, 1));
+        hg.setAttribute('aType', new THREE.BufferAttribute(aType, 1));
+        hg.setAttribute('aFrac', new THREE.BufferAttribute(aFrac, 1));
+        hg.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 4000);
+
+        const hu = {
+            uTime: { value: 0 },
+            uFormT: { value: -99 },
+            uFormDur: { value: CFG.FORM_DUR },
+            uStagger: { value: CFG.STAGGER },
+            uBeatAmp: { value: 0 },
+            uPeriod: { value: CFG.BEAT_PERIOD },
+            uPointScale: { value: 40 },
+            uPower: { value: CFG.BEAT_POWER },
+            uColCore: { value: new THREE.Color(CFG.COL_CORE) },
+            uColEdge: { value: new THREE.Color(CFG.COL_EDGE) },
+            uColHalo: { value: new THREE.Color(CFG.COL_HALO) }
+        };
+
+        const heartMat = new THREE.ShaderMaterial({
+            uniforms: hu,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            vertexShader: /* glsl */`
+        uniform float uTime, uFormT, uFormDur, uStagger, uBeatAmp, uPeriod, uPointScale, uPower;
+        uniform vec3 uColCore, uColEdge, uColHalo;
+        attribute vec3 aStart, aJitter;
+        attribute float aSize, aSeed, aType, aFrac;
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        float hash11(float p){
+          p = fract(p * 0.1031);
+          p *= p + 33.33;
+          p *= p + p;
+          return fract(p);
+        }
+        // nhịp tim "thình - thịch" thay cho sóng sin phẳng của bản Python
+        float beatWave(float t){
+          float q = fract(t / uPeriod);
+          float a = exp(-pow((q - 0.11) / 0.070, 2.0));
+          float b = 0.62 * exp(-pow((q - 0.33) / 0.088, 2.0));
+          return a + b - 0.24;
+        }
+        vec3 rotY(vec3 v, float a){
+          float c = cos(a), s = sin(a);
+          return vec3(c*v.x + s*v.z, v.y, -s*v.x + c*v.z);
+        }
+
+        void main(){
+          float beat  = beatWave(uTime) * uBeatAmp;
+          vec3  pos;
+          float alpha;
+
+          if (aType > 2.5){
+            // ---- quầng sáng: nở ra mỗi khi tim co lại ----
+            float haloR = 4.0 + 6.0 * (1.0 + 1.30 * beat);
+            float r = max(length(position), 1.0);
+            pos = position * (1.0 - 0.055 * beat) + haloR * pow(r, -1.2) * position + aJitter;
+            float c = clamp(beat * 1.7, -1.0, 1.0);
+            alpha = (0.38 + 0.62 * c * c) * 0.40;
+            alpha *= mix(0.12, 1.0, hash11(aSeed * 977.0 + floor(uTime * 6.25)));  // lấp lánh
+            vColor = uColHalo;
+          } else {
+            // ---- thân tim: công thức co bóp của test.py ----
+            float ratio = uPower * beat;
+            float r = max(length(position), 1.0);
+            pos = position - ratio * pow(r, -1.04) * position;
+            pos *= 1.0 - 0.055 * beat;                 // cả trái tim co lại theo nhịp
+            float fr = floor(uTime * 12.0);
+            pos += (vec3(hash11(aSeed*13.0+fr), hash11(aSeed*29.0+fr), hash11(aSeed*57.0+fr)) - 0.5) * 3.0;
+            vColor = mix(uColCore, uColEdge, smoothstep(0.10, 1.0, aFrac));
+            alpha  = aType < 0.5 ? 0.62 : (aType < 1.5 ? 0.58 : 0.56);
+            alpha *= 1.0 + 0.30 * beat;
+          }
+
+          // ---- các hạt bay từ ngân hà về kết thành trái tim ----
+          float tp = clamp((uFormT - aSeed * uStagger) / uFormDur, 0.0, 1.0);
+          float e  = 1.0 - pow(1.0 - tp, 3.0);
+          vec3 fin = rotY(mix(aStart, pos, e), (1.0 - e) * 1.7);
+          alpha *= smoothstep(0.0, 0.20, tp) * mix(1.0, 2.1, 1.0 - e);   // sáng hơn khi đang bay
+
+          vec4 mv = modelViewMatrix * vec4(fin, 1.0);
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = clamp(aSize * uPointScale * (1.0 + (1.0 - e) * 0.7) / max(-mv.z, 0.001), 0.0, 24.0);
+          vAlpha = alpha;
+        }
+      `,
+            fragmentShader: /* glsl */`
+        precision mediump float;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main(){
+          float d = length(gl_PointCoord - vec2(0.5));
+          if (d > 0.5) discard;
+          float a = pow(1.0 - d * 2.0, 1.6);
+          gl_FragColor = vec4(vColor, a * vAlpha);
+        }
+      `
+        });
+
+        const heartGroup = new THREE.Group();
+        const heartInner = new THREE.Points(hg, heartMat);
+        heartInner.frustumCulled = false;
+        heartInner.scale.setScalar(CFG.HEART_SCALE);
+        heartInner.position.y = -HEART_CY * CFG.HEART_SCALE;   // đưa tâm hình về giữa khung
+        heartGroup.add(heartInner);
+        heartGroup.visible = false;
+        heartGroup.renderOrder = 2;
+        scene.add(heartGroup);
+
+        /* --- hào quang mềm phía sau trái tim --------------------------------- */
+        const gc = document.createElement('canvas'); gc.width = gc.height = 256;
+        const gx = gc.getContext('2d');
+        const grd = gx.createRadialGradient(128, 128, 0, 128, 128, 128);
+        grd.addColorStop(0.00, 'rgba(255,255,255,0.95)');
+        grd.addColorStop(0.12, 'rgba(255,255,255,0.42)');
+        grd.addColorStop(0.35, 'rgba(255,255,255,0.12)');
+        grd.addColorStop(1.00, 'rgba(255,255,255,0)');
+        gx.fillStyle = grd; gx.fillRect(0, 0, 256, 256);
+        const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: new THREE.CanvasTexture(gc),
+            color: new THREE.Color(CFG.COL_GLOW),
+            transparent: true, depthTest: false, depthWrite: false,
+            blending: THREE.AdditiveBlending, opacity: 0
+        }));
+        glow.scale.setScalar(HEART_W * CFG.HEART_SCALE * 2.2);
+        heartGroup.add(glow);
+
+        function beatJS(t) {
+            const q = (t / CFG.BEAT_PERIOD) % 1;
+            return Math.exp(-Math.pow((q - 0.11) / 0.070, 2))
+                + 0.62 * Math.exp(-Math.pow((q - 0.33) / 0.088, 2)) - 0.24;
+        }
+
+        /* ================================================================== *
+         *  3. CHUYỂN CẢNH:  ngân hà  →  trái tim
+         * ================================================================== */
+
+        let phase = 'galaxy';          // galaxy | forming | heart | returning
+        let autoOnce = true;           // chỉ tự chuyển cảnh lần đầu; sau khi bấm R thì chờ bạn chạm
+        let t0 = 0, tR = 0, galaxyT0 = 0, retFrom = 0;
+        const camFrom = new THREE.Vector3(), camTo = new THREE.Vector3();
+        const camHome = new THREE.Vector3(0, 4, 21), retCamFrom = new THREE.Vector3();
+        const hint = document.getElementById('hint');
+
+        function fitDistance() {
+            const vf = camera.fov * Math.PI / 180;
+            const w = HEART_W * CFG.HEART_SCALE * 1.30;
+            const h = HEART_H * CFG.HEART_SCALE * 1.55;
+            return Math.max((h / 2) / Math.tan(vf / 2), (w / 2) / (Math.tan(vf / 2) * camera.aspect));
+        }
+
+        function startHeart() {
+            if (phase !== 'galaxy') return;
+            phase = 'forming';
+            autoOnce = false;
+            t0 = clock.getElapsedTime();
+            heartGroup.visible = true;
+            heartGroup.quaternion.copy(camera.quaternion);   // tim luôn quay mặt về phía đang nhìn
+            controls.enabled = false;
+            camFrom.copy(camera.position);
+            camHome.copy(camera.position);          // vị trí để quay về khi bấm R
+            camTo.copy(camera.position).setLength(fitDistance());
+            hu.uPointScale.value = 2.0 * fitDistance();
+            hint.style.opacity = 0;
+        }
+
+        // bay ngược trở lại: các hạt tan ra thành sao, ngân hà sáng lại
+        function backToGalaxy() {
+            if (phase === 'galaxy' || phase === 'returning') return;
+            phase = 'returning';
+            tR = clock.getElapsedTime();
+            retFrom = Math.min(hu.uFormT.value, CFG.FORM_DUR + CFG.STAGGER);
+            retCamFrom.copy(camera.position);
+            p.visible = true;
+            controls.enabled = false;
+            hint.style.opacity = 0;
+        }
+
+        // chạm / bấm (nhưng không phải đang kéo) để chuyển cảnh
+        let dx0 = 0, dy0 = 0;
+        addEventListener('pointerdown', e => { dx0 = e.clientX; dy0 = e.clientY; });
+        addEventListener('pointerup', e => {
+            if (Math.hypot(e.clientX - dx0, e.clientY - dy0) < 8) startHeart();
+        });
+        addEventListener('keydown', e => {
+            if (e.key === 'r' || e.key === 'R') backToGalaxy();
+            else startHeart();
+        });
+
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+            if (phase !== 'galaxy') {
+                camera.position.setLength(fitDistance());
+                camTo.copy(camera.position);
+                hu.uPointScale.value = 2.0 * fitDistance();
+            }
+        });
+
+        /* ================================================================== *
+         *  4. VÒNG LẶP
+         * ================================================================== */
+
+        let clock = new THREE.Clock();
+        const tmp = new THREE.Vector3();
+
+        renderer.setAnimationLoop(() => {
+            const now = clock.getElapsedTime();
+
+            // --- ngân hà: y hệt bản gốc ---
+            let tg = now * 0.5;
+            gu.time.value = tg * Math.PI;
+            p.rotation.y = tg * 0.05;
+
+            if (phase === 'galaxy') {
+                if (autoOnce && now - galaxyT0 > CFG.AUTO_DELAY) startHeart();
+
+            } else if (phase === 'returning') {
+                const k = Math.min(1, (now - tR) / CFG.RETURN_DUR);
+                const s = k * k * (3 - 2 * k);
+                hu.uTime.value = now;
+                hu.uFormT.value = retFrom * (1 - s);            // đảo ngược quá trình kết tim
+                hu.uBeatAmp.value = Math.max(0, 1 - s * 2.0);
+                camera.position.lerpVectors(retCamFrom, camHome, s);
+                camera.lookAt(0, 0, 0);
+                gu.gFade.value = CFG.GALAXY_DIM + (1 - CFG.GALAXY_DIM) * Math.min(1, k * 1.7);
+                glow.material.opacity *= Math.max(0, 1 - k * 2.0);
+                if (k >= 1) {
+                    phase = 'galaxy';
+                    galaxyT0 = now;                            // đếm lại từ đầu, không tự nhảy sang tim
+                    heartGroup.visible = false;
+                    hu.uFormT.value = -99;
+                    hu.uBeatAmp.value = 0;
+                    gu.gFade.value = 1;
+                    glow.material.opacity = 0;
+                    controls.enabled = true;
+                    hint.textContent = 'Kéo để xoay · Chạm để tiếp tục';
+                    hint.style.opacity = 1;
+                }
+
+            } else {
+                const e = now - t0;
+                hu.uTime.value = now;
+                hu.uFormT.value = e;
+                // camera trôi vào khung hình của trái tim (chỉ trong lúc chuyển cảnh,
+                // sau đó trả quyền điều khiển lại cho người xem)
+                const k = Math.min(1, e / CFG.CAM_DUR);
+                const s = k * k * (3 - 2 * k);
+                if (phase === 'forming') {
+                    camera.position.lerpVectors(camFrom, camTo, s);
+                    camera.lookAt(0, 0, 0);
+                }
+                const kd = Math.min(1, e / 1.9), sd = kd * kd * (3 - 2 * kd);
+                gu.gFade.value = 1 - (1 - CFG.GALAXY_DIM) * sd;
+
+                // nhịp đập lên dần sau khi tim thành hình
+                const fin = CFG.FORM_DUR + CFG.STAGGER;
+                hu.uBeatAmp.value = Math.min(1, Math.max(0, (e - fin * 0.75) / 1.0));
+
+                const b = beatJS(now) * hu.uBeatAmp.value;
+                glow.material.opacity = (0.20 + 0.32 * Math.max(0, b)) * Math.min(1, e / 2.0);
+                glow.scale.setScalar(HEART_W * CFG.HEART_SCALE * (2.2 + 0.25 * b));
+
+                if (phase === 'forming' && e > Math.max(CFG.CAM_DUR, fin)) {
+                    phase = 'heart';
+                    controls.enabled = true;
+                    hint.textContent = 'Kéo để xoay · R để quay lại ngân hà';
+                    hint.style.opacity = 1;
+                }
+            }
+
+            p.visible = gu.gFade.value > 0.012;
+
+            controls.update();
+            renderer.render(scene, camera);
+        });
+    </script>
+</body>
+
+</html>
